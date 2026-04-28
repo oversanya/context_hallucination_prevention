@@ -1,0 +1,10 @@
+{
+  "roc_auc": 0.5550000000000002,
+  "f1": 0.6666666666666666,
+  "precision": 0.5,
+  "recall": 1.0,
+  "optimal_threshold": 0.01,
+  "n_train": 160,
+  "n_test": 40,
+  "model": "facebook/opt-125m"
+}

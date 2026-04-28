@@ -1,0 +1,89 @@
+\subsection{Lookback Lens: Attention-Based Groundedness Estimation}
+\label{sec:lookback_lens}
+
+\subsubsection{Methodology}
+
+Chuang et al.~\cite{lookback_lens_2024} observe that when a language model relies on
+its parametric memory rather than the provided context, attention weight mass shifts
+from context tokens toward previously generated tokens.
+The \emph{lookback ratio} quantifies this shift.
+For layer $l$, head $h$, and token position $t$:
+\[
+  r_{l,h}(t) = \frac{\displaystyle\sum_{j \in \mathcal{C}} \alpha_{l,h}(t,j)}
+                    {\displaystyle\sum_{j=1}^{T} \alpha_{l,h}(t,j)},
+\]
+where $\mathcal{C}$ denotes the set of context token positions and
+$\alpha_{l,h}(t,j)$ is the attention weight from position $t$ to position $j$.
+The feature vector for a sample is obtained by averaging $r_{l,h}(t)$ over all response
+token positions, yielding a vector of shape $(L \times H,)$ where $L$ is the number of
+layers and $H$ the number of attention heads.
+A logistic regression classifier is trained on these features to predict whether a
+response is hallucinated.
+
+\subsubsection{Implementation}
+
+We implement \texttt{LookbackRatioExtractor} in \texttt{src/lookback\_lens/extractor.py}
+and \texttt{LookbackLensClassifier} in \texttt{src/lookback\_lens/classifier.py}.
+The extractor performs a single forward pass of the evaluator model with
+\texttt{output\_attentions=True} and no gradient computation; tokenization separates
+context from response to derive the context position mask $\mathcal{C}$.
+The classifier wraps \texttt{sklearn.linear\_model.LogisticRegression} with
+threshold-optimal evaluation and joblib serialization.
+
+\subsubsection{Experimental Setup}
+
+The evaluator model is \texttt{facebook/opt-125m} (125\,M parameters, 12 layers,
+12 heads, feature dimension 144), running on MPS.
+We use the same balanced RAGTruth split as the FActScore-Turbo experiment
+($n = 200$, seed 42, 50\% hallucination rate), with an 80/20 stratified
+train/test split (160/40 samples).
+
+\subsubsection{Results}
+
+\begin{table}[h]
+  \centering
+  \caption{Lookback Lens baseline on RAGTruth ($n=200$, \texttt{opt-125m} evaluator).}
+  \label{tab:lookback_results}
+  \begin{tabular}{lcc}
+    \toprule
+    Metric & Lookback Lens & FActScore-Turbo \\
+    \midrule
+    ROC-AUC                      & 0.555 & 0.706 \\
+    F1 at optimal $\tau$         & 0.667 & 0.699 \\
+    Precision at optimal $\tau$  & 0.500 & 0.670 \\
+    Recall at optimal $\tau$     & 1.000 & 0.730 \\
+    Optimal $\tau$               & 0.010 & 0.917 \\
+    Feature extraction time      & ${\approx}0.16$\,s/sample & ${\approx}6.1$\,s/sample \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The ROC-AUC of 0.555 is only marginally above chance (0.5) and substantially below the
+FActScore-Turbo baseline of 0.706.  Furthermore, the reported F1 of 0.667 is achieved at
+a degenerate threshold $\tau = 0.01$, which labels every test sample as hallucinated;
+with a 50\% positive rate this yields precision\,$= 0.5$ and recall\,$= 1.0$ by construction,
+not a meaningful detection result.
+
+\subsubsection{Analysis}
+
+The near-random AUC is explained by a fundamental mismatch between the evaluator model
+(\texttt{opt-125m}) and the generator models that produced the RAGTruth responses.
+The original Lookback Lens method~\cite{lookback_lens_2024} extracts attention weights
+\emph{from the same model that generated the text}: the lookback ratio then directly
+reflects whether that model was attending to context during its own generation steps.
+When an unrelated evaluator model processes a pre-generated response, its attention
+patterns reflect the model's reading comprehension of the concatenated sequence, not a
+generation-time groundedness signal.
+
+This constraint has important implications for the modified beam search integration
+(Chapter~\ref{ch:beam_search}).  Lookback Lens is not suitable as a cross-model
+offline detector; its natural deployment is \emph{online}: compute lookback ratios during
+the beam search generation step of the target model, then use them to rerank beams in
+real time.  In this setting, the feature extraction cost of ${\approx}0.16$\,s/sample
+is not the relevant quantity — the cost is a single extra tensor operation per decoding
+step, which is negligible relative to the forward pass.
+
+The practical recommendation from this experiment is therefore: implement Lookback Lens
+as a step-level signal computed during generation with the target model (not as an
+offline evaluator), and reserve FActScore-Turbo (AUC\,=\,0.706) for sentence-level or
+final-output reranking where cross-model factual precision is appropriate.
