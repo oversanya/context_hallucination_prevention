@@ -1,0 +1,11 @@
+seed: 42
+dataset: ragtruth
+n_samples: 200
+
+scorer:
+  model: qwen2.5:7b
+  temperature: 0.0
+  max_facts: 15
+  batch_verify: true
+
+output_dir: experiments/factscore_turbo_baseline/results

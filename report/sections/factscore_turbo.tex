@@ -1,0 +1,86 @@
+\subsection{FActScore-Turbo: Factual Precision as a Hallucination Signal}
+\label{sec:factscore_turbo}
+
+\subsubsection{Methodology}
+
+FActScore-Turbo~\cite{factscore_turbo_vk} quantifies factual precision by decomposing a
+generated response into atomic, self-contained claims and verifying each claim against the
+source context with a local language model.
+
+Given a generated response $r$ and source context $c$, the pipeline executes two stages:
+
+\begin{enumerate}
+    \item \textbf{Decomposition.} A language model $\mathcal{M}$ decomposes $r$ into a set
+          of atomic facts $\mathcal{F} = \{f_1, \dots, f_n\}$, each independently verifiable.
+    \item \textbf{Verification.} Each fact $f_i$ is verified against $c$ by $\mathcal{M}$ in
+          a single batched LLM call, yielding binary support flags $s_i \in \{0, 1\}$.
+\end{enumerate}
+
+The factual precision score is then defined as
+\[
+  \text{FActScore}(r, c) = \frac{\sum_{i=1}^{n} s_i}{n} \;\in\; [0, 1].
+\]
+A response is flagged as hallucinated when $\text{FActScore}(r, c) < \tau$ for a chosen
+threshold $\tau$.
+
+Both decomposition and verification calls are routed to \texttt{qwen2.5:7b} running locally
+via Ollama on an Apple M1 Max (32\,GB).  The context is truncated to 2\,500 characters; a
+maximum of 15 atomic facts is extracted per response.  The scorer is fully deterministic
+($T = 0$) and reproducible under a fixed random seed.
+
+\subsubsection{Experimental Setup}
+
+We evaluate FActScore-Turbo as a hallucination detector on the RAGTruth
+dataset~\cite{ragtruth}, which provides 15\,090 annotated $(\text{context}, \text{response})$
+pairs from QA and summarisation tasks.  A balanced subset of $n = 200$ examples (100
+hallucinated, 100 faithful) was sampled with seed 42.  All facts for a given sample are
+verified in a single LLM call (\texttt{batch\_verify=True}), falling back to per-fact calls
+only on JSON parse failure.  The experiment configuration is logged via
+Hydra/OmegaConf~\cite{hydra} for full reproducibility.
+
+\subsubsection{Results}
+
+\begin{table}[h]
+  \centering
+  \caption{FActScore-Turbo hallucination detection on RAGTruth ($n = 200$, balanced).}
+  \label{tab:factscore_results}
+  \begin{tabular}{lc}
+    \toprule
+    Metric                             & Value  \\
+    \midrule
+    ROC-AUC                            & 0.706  \\
+    F1 at default $\tau = 0.5$         & 0.020  \\
+    F1 at optimal $\tau = 0.917$       & 0.699  \\
+    Precision at optimal $\tau$        & 0.670  \\
+    Recall at optimal $\tau$           & 0.730  \\
+    Mean FActScore                     & $0.871 \pm 0.138$ \\
+    Median FActScore                   & 0.905  \\
+    Mean facts per response            & 9.7    \\
+    Evaluation time (200 samples)      & ${\approx}20$\,min (${\approx}6.1$\,s/sample) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The ROC-AUC of 0.706 confirms that FActScore-Turbo captures a meaningful discriminative
+signal substantially above the random baseline of 0.5.  The stark contrast between
+performance at the default threshold ($\tau = 0.5$, F1\,$= 0.020$) and the optimal threshold
+($\tau = 0.917$, F1\,$= 0.699$) is explained by the high average score: the verifier model
+classifies most claims as supported (mean\,$= 0.871$, median\,$= 0.905$) regardless of the
+ground-truth label.  At $\tau = 0.5$, only 2 of 200 samples are predicted as hallucinated,
+yielding near-zero recall.
+
+These findings have two important implications.
+
+First, threshold calibration is essential.  The standard value $\tau = 0.5$ from the original
+FActScore formulation does not transfer to this model/dataset pair; a held-out calibration set
+is required to determine the operating point.
+
+Second, the strong ranking signal (AUC\,$= 0.706$) makes FActScore-Turbo well-suited as a
+\emph{reranking} signal in the modified beam search (see Chapter~\ref{ch:beam_search}): a
+binary decision is not required, only a monotone score that correlates with faithfulness.
+
+The evaluation throughput of ${\approx}6.1$\,s per sample is compatible with offline
+reranking but prohibitive for step-level beam search scoring.  This motivates the use of a
+lighter, attention-based surrogate (Lookback Lens,
+Chapter~\ref{ch:lookback_lens}) for token-step scoring, with FActScore-Turbo reserved for
+sentence-level or final-output evaluation.

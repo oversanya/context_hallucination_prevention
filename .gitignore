@@ -1,3 +1,11 @@
+# Project-specific exclusions
+.claude/
+CLAUDE.md
+.vscode/
+outputs/
+.DS_Store
+data/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
