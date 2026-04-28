@@ -1,0 +1,9 @@
+seed: 42
+dataset: ragtruth
+n_train: 160
+n_test: 40
+model_name: facebook/opt-125m
+device: mps
+batch_size: 8
+max_total_tokens: 512
+output_dir: experiments/lookback_lens_baseline/results
