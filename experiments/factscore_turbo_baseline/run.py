@@ -79,7 +79,7 @@ def _plot_roc_curve(df: pd.DataFrame, metrics: dict, out_dir: Path) -> None:
     logger.info("Saved roc_curve.png")
 
 
-def _plot_per_task_f1(df: pd.DataFrame, out_dir: Path, threshold: float = 0.5) -> None:
+def _plot_per_task_f1(df: pd.DataFrame, out_dir: Path, threshold: float = 0.5, label: str = "") -> None:
     """Bar chart of binary F1 per task_type."""
     from sklearn.metrics import f1_score
 
@@ -103,7 +103,8 @@ def _plot_per_task_f1(df: pd.DataFrame, out_dir: Path, threshold: float = 0.5) -
     ax.set_ylim(0, 1)
     ax.set_xlabel("Task Type")
     ax.set_ylabel("Binary F1")
-    ax.set_title("Per-Task Hallucination Detection F1 (threshold = 0.5)")
+    title_suffix = label if label else f"τ = {threshold:.3f}"
+    ax.set_title(f"Per-Task Hallucination Detection F1 ({title_suffix})")
     fig.tight_layout()
     fig.savefig(out_dir / "per_task_f1.png", dpi=150)
     plt.close(fig)
@@ -150,9 +151,10 @@ def main(cfg: DictConfig) -> None:
     logger.info("Metrics: %s", json.dumps(metrics, indent=2))
 
     # ── Plots ─────────────────────────────────────────────────────────────────
+    optimal_tau = metrics.get("optimal_threshold", 0.5)
     _plot_factscore_distribution(results_df, out_dir)
     _plot_roc_curve(results_df, metrics, out_dir)
-    _plot_per_task_f1(results_df, out_dir)
+    _plot_per_task_f1(results_df, out_dir, threshold=optimal_tau, label=f"optimal τ = {optimal_tau:.3f}")
 
     logger.info("Experiment complete. Results at: %s", out_dir)
 

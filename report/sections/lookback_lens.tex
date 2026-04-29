@@ -34,6 +34,8 @@ threshold-optimal evaluation and joblib serialization.
 
 The evaluator model is \texttt{facebook/opt-125m} (125\,M parameters, 12 layers,
 12 heads, feature dimension 144), running on MPS.
+Context is truncated to 384 tokens and response to 128 tokens independently,
+guaranteeing that response token positions are always present in the attention map.
 We use the same balanced RAGTruth split as the FActScore-Turbo experiment
 ($n = 200$, seed 42, 50\% hallucination rate), with an 80/20 stratified
 train/test split (160/40 samples).
@@ -48,21 +50,24 @@ train/test split (160/40 samples).
     \toprule
     Metric & Lookback Lens & FActScore-Turbo \\
     \midrule
-    ROC-AUC                      & 0.555 & 0.706 \\
-    F1 at optimal $\tau$         & 0.667 & 0.699 \\
-    Precision at optimal $\tau$  & 0.500 & 0.670 \\
-    Recall at optimal $\tau$     & 1.000 & 0.730 \\
-    Optimal $\tau$               & 0.010 & 0.917 \\
-    Feature extraction time      & ${\approx}0.16$\,s/sample & ${\approx}6.1$\,s/sample \\
+    ROC-AUC                      & 0.625 & 0.706 \\
+    F1 at optimal $\tau$         & 0.704 & 0.699 \\
+    Precision at optimal $\tau$  & 0.559 & 0.670 \\
+    Recall at optimal $\tau$     & 0.950 & 0.730 \\
+    Optimal $\tau$               & 0.320 & 0.917 \\
+    Feature extraction time      & ${\approx}0.30$\,s/sample & ${\approx}6.1$\,s/sample \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-The ROC-AUC of 0.555 is only marginally above chance (0.5) and substantially below the
-FActScore-Turbo baseline of 0.706.  Furthermore, the reported F1 of 0.667 is achieved at
-a degenerate threshold $\tau = 0.01$, which labels every test sample as hallucinated;
-with a 50\% positive rate this yields precision\,$= 0.5$ and recall\,$= 1.0$ by construction,
-not a meaningful detection result.
+The ROC-AUC of 0.625 is meaningfully above chance (0.5) and approaches the
+FActScore-Turbo baseline of 0.706, despite \texttt{opt-125m} not being the model
+that generated the RAGTruth responses.  The improvement from 0.555 (initial run,
+contaminated by 35.5\% zero-feature vectors due to a context-truncation bug) to 0.625
+confirms that the original result was dominated by the implementation defect rather than
+fundamental signal absence.  The F1 of 0.704 at the optimal threshold $\tau = 0.320$
+is comparable to FActScore-Turbo's 0.699, though with lower precision (0.559 vs 0.670)
+and higher recall (0.950 vs 0.730).
 
 \subsubsection{Analysis}
 

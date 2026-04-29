@@ -35,23 +35,24 @@ class LookbackRatioExtractor:
         HuggingFace model identifier.
     device : str
         Torch device string.  Use "mps" on Apple Silicon.
-    max_context_chars : int
-        Context string is truncated to this character count before tokenization.
-    max_total_tokens : int
-        Maximum sequence length (context + response) in tokens.
+    max_context_tokens : int
+        Context is truncated to this many tokens before concatenation.
+        Setting a fixed budget guarantees response tokens always survive.
+    max_response_tokens : int
+        Response is truncated to this many tokens before concatenation.
     """
 
     def __init__(
         self,
         model_name: str = "facebook/opt-125m",
         device: str = "mps",
-        max_context_chars: int = 2_000,
-        max_total_tokens: int = 512,
+        max_context_tokens: int = 384,
+        max_response_tokens: int = 128,
     ) -> None:
         self.model_name = model_name
         self.device = device
-        self.max_context_chars = max_context_chars
-        self.max_total_tokens = max_total_tokens
+        self.max_context_tokens = max_context_tokens
+        self.max_response_tokens = max_response_tokens
 
         logger.info("Loading tokenizer: %s", model_name)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -95,43 +96,41 @@ class LookbackRatioExtractor:
             Returns a zero vector on error.
         """
         feature_dim = self.n_layers * self.n_heads
-        ctx = context[: self.max_context_chars]
 
-        # Tokenize context alone to determine context token count.
-        ctx_ids = self.tokenizer(
-            ctx,
+        # Tokenize context and response with independent budgets so that
+        # long contexts cannot crowd out response tokens.
+        ctx_enc = self.tokenizer(
+            context,
             add_special_tokens=False,
             truncation=True,
-            max_length=self.max_total_tokens,
-        )["input_ids"]
-        n_ctx = len(ctx_ids)
+            max_length=self.max_context_tokens,
+            return_tensors="pt",
+        )
+        resp_enc = self.tokenizer(
+            response,
+            add_special_tokens=False,
+            truncation=True,
+            max_length=self.max_response_tokens,
+            return_tensors="pt",
+        )
+
+        ctx_ids  = ctx_enc["input_ids"]   # (1, n_ctx)
+        resp_ids = resp_enc["input_ids"]  # (1, n_resp)
+        n_ctx  = ctx_ids.shape[1]
+        n_resp = resp_ids.shape[1]
 
         if n_ctx == 0:
             logger.warning("Empty context after tokenization — returning zero vector.")
             return np.zeros(feature_dim, dtype=np.float32)
-
-        # Tokenize [context + response] jointly.
-        sep = " "
-        combined = ctx + sep + response
-        enc = self.tokenizer(
-            combined,
-            return_tensors="pt",
-            truncation=True,
-            max_length=self.max_total_tokens,
-            padding=False,
-        )
-        input_ids = enc["input_ids"].to(self.device)
-        attention_mask = enc["attention_mask"].to(self.device)
-        seq_len = input_ids.shape[1]
-
-        # Context positions are [0, n_ctx); response positions are [n_ctx, seq_len).
-        n_ctx_clamped = min(n_ctx, seq_len)
-        context_positions = list(range(n_ctx_clamped))
-
-        if len(context_positions) == seq_len:
-            # No response tokens remain after truncation.
-            logger.warning("Response tokens truncated to zero — returning zero vector.")
+        if n_resp == 0:
+            logger.warning("Empty response after tokenization — returning zero vector.")
             return np.zeros(feature_dim, dtype=np.float32)
+
+        input_ids      = torch.cat([ctx_ids, resp_ids], dim=1).to(self.device)
+        attention_mask = torch.ones(1, n_ctx + n_resp, dtype=torch.long).to(self.device)
+        seq_len        = n_ctx + n_resp
+
+        context_positions = list(range(n_ctx))
 
         # Forward pass — collect all attention tensors.
         with torch.no_grad():
@@ -143,7 +142,7 @@ class LookbackRatioExtractor:
 
         # attentions: tuple of (1, n_heads, seq_len, seq_len) per layer.
         # Compute per-layer, per-head lookback ratios at response positions.
-        response_positions = list(range(len(context_positions), seq_len))
+        response_positions = list(range(n_ctx, seq_len))
         features = np.zeros(feature_dim, dtype=np.float32)
 
         for l_idx, attn_layer in enumerate(outputs.attentions):

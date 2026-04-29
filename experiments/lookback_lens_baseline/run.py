@@ -211,7 +211,8 @@ def main(cfg: DictConfig) -> None:
     extractor = LookbackRatioExtractor(
         model_name=cfg.model_name,
         device=cfg.device,
-        max_total_tokens=cfg.max_total_tokens,
+        max_context_tokens=cfg.max_context_tokens,
+        max_response_tokens=cfg.max_response_tokens,
     )
 
     X = _extract_with_checkpoints(
