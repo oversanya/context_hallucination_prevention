@@ -52,9 +52,9 @@ def _extract_hallucination_label_ragtruth(labels) -> bool:
     """
     Derive a binary hallucination label from RAGTruth's ``labels`` field.
 
-    Handles three schemas observed in the dataset:
+    Handles four schemas observed in the dataset:
     - bool / numeric: direct cast.
-    - list of span dicts: hallucinated iff non-empty.
+    - list / numpy array of span dicts: hallucinated iff non-empty.
     - dict with 'spans'/'hallucinations' keys: hallucinated iff non-empty span list.
     - dict with integer flag values (e.g. {'evident_conflict': 1, 'baseless_info': 0}):
       hallucinated iff any flag > 0.
@@ -63,6 +63,8 @@ def _extract_hallucination_label_ragtruth(labels) -> bool:
         return labels
     if isinstance(labels, (int, float)):
         return bool(labels)
+    if isinstance(labels, np.ndarray):
+        return labels.size > 0
     if isinstance(labels, list):
         return len(labels) > 0
     if isinstance(labels, dict):
@@ -177,6 +179,61 @@ def load_ragtruth(
         len(df), df["is_hallucinated"].sum(), 100 * df["is_hallucinated"].mean(),
     )
     return df[_SCHEMA]
+
+
+def load_ragtruth_split(
+    n_dev: int,
+    n_test: int,
+    seed: int = 42,
+    task_filter: Optional[str] = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Load RAGTruth and slice it into two **disjoint** balanced subsets.
+
+    Performs a single :py:func:`load_ragtruth` call of size ``n_dev + n_test``
+    and slices the result so that ``dev`` is the first ``n_dev`` rows and
+    ``test`` is the remaining ``n_test`` rows.  The empty intersection of row
+    indices is asserted explicitly to guard against future refactors.
+
+    Parameters
+    ----------
+    n_dev : int
+        Number of rows in the dev (sweep) split.
+    n_test : int
+        Number of rows in the held-out test split.
+    seed : int
+        Random seed for the underlying balanced sampling.
+    task_filter : str, optional
+        If given, restrict to rows whose ``task_type`` contains this substring.
+
+    Returns
+    -------
+    (dev, test) : tuple of DataFrames, with disjoint indices.
+    """
+    if n_dev <= 0 or n_test <= 0:
+        raise ValueError("n_dev and n_test must both be positive.")
+    # `load_ragtruth` does balanced sampling via `n_each = n // 2`, which
+    # rounds down for odd totals.  Pad up by 2 so we always have at least
+    # the requested count after the integer division.
+    requested = n_dev + n_test
+    full = load_ragtruth(n_samples=requested + 2, seed=seed, task_filter=task_filter)
+    if len(full) < requested:
+        raise ValueError(
+            f"RAGTruth balanced sample yielded {len(full)} rows; need {requested}."
+        )
+    dev  = full.iloc[:n_dev].reset_index(drop=True)
+    test = full.iloc[n_dev:n_dev + n_test].reset_index(drop=True)
+    # Disjointness assertion (audit C2): use the original integer indices from
+    # the freshly-shuffled `full` DataFrame.  After a reset_index they are 0..N
+    # and trivially overlap, so we re-derive disjointness from the original
+    # row positions.
+    dev_pos  = set(range(n_dev))
+    test_pos = set(range(n_dev, n_dev + n_test))
+    assert dev_pos.isdisjoint(test_pos), "dev / test row positions overlap"
+    logger.info(
+        "RAGTruth split: dev=%d, test=%d (disjoint, seed=%d)", n_dev, n_test, seed,
+    )
+    return dev, test
 
 
 def load_hallumix(

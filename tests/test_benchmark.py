@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from src.benchmark import compute_metrics, load_ragtruth
+from src.benchmark import compute_metrics, load_ragtruth, load_ragtruth_split
 
 
 # ─── Tests: compute_metrics ───────────────────────────────────────────────────
@@ -33,21 +33,22 @@ def test_compute_metrics_basic() -> None:
 
 # ─── Tests: load_ragtruth ─────────────────────────────────────────────────────
 
-def _make_fake_ragtruth_dataset() -> MagicMock:
+def _make_fake_ragtruth_dataset(n: int = 10) -> MagicMock:
     """Construct a minimal fake HuggingFace dataset mimicking RAGTruth schema."""
     import pandas as pd
     from datasets import Dataset
 
+    n_each = n // 2
     fake_df = pd.DataFrame({
-        "source_info": ["Context about Paris." * 3] * 10,
-        "question":    ["Where is Paris?"] * 10,
-        "response":    ["Paris is in France."] * 10,
-        "hallucination_labels_processed": [
-            [],          # faithful
-            [{"span": "hallucinated text"}],  # hallucinated
-        ] * 5,
-        "task_type":   ["QA"] * 10,
-        "model":       ["gpt-4"] * 10,
+        "source_info": ["Context about Paris." * 3] * n,
+        "question":    ["Where is Paris?"] * n,
+        "response":    [f"Paris response number {i}." for i in range(n)],
+        "hallucination_labels_processed": (
+            [[] for _ in range(n_each)]
+            + [[{"span": f"hallucinated text {i}"}] for i in range(n_each)]
+        ),
+        "task_type":   ["QA"] * n,
+        "model":       ["gpt-4"] * n,
     })
     fake_hf = Dataset.from_pandas(fake_df)
     mock_ds = MagicMock()
@@ -69,3 +70,29 @@ def test_load_ragtruth_smoke() -> None:
     )
     assert df["source"].unique().tolist() == ["ragtruth"]
     assert df["is_hallucinated"].dtype == bool or df["is_hallucinated"].dtype == object
+
+
+# ─── Tests: load_ragtruth_split ───────────────────────────────────────────────
+
+def test_dev_test_split_disjoint() -> None:
+    """
+    PLAN audit C2: dev and test must be drawn from a single balanced sample
+    and must be row-disjoint by construction.  Verifies (a) the split sizes,
+    (b) that no response string appears in both subsets, and (c) reproducibility
+    under the same seed.
+    """
+    n_dev, n_test = 4, 6   # small enough that the fake dataset (n=20) fits comfortably
+    with patch("src.benchmark.load_dataset", return_value=_make_fake_ragtruth_dataset(n=20)):
+        dev1, test1 = load_ragtruth_split(n_dev=n_dev, n_test=n_test, seed=7)
+        dev2, test2 = load_ragtruth_split(n_dev=n_dev, n_test=n_test, seed=7)
+
+    assert len(dev1)  == n_dev
+    assert len(test1) == n_test
+
+    # Row-disjointness: response strings are unique in the fake dataset, so we
+    # can use them as identity tokens.
+    assert set(dev1["response"]).isdisjoint(set(test1["response"]))
+
+    # Reproducibility: same seed → same rows in same order.
+    pd.testing.assert_frame_equal(dev1.reset_index(drop=True),  dev2.reset_index(drop=True))
+    pd.testing.assert_frame_equal(test1.reset_index(drop=True), test2.reset_index(drop=True))

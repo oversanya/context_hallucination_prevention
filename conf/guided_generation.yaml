@@ -1,0 +1,42 @@
+seed: 42
+
+generator:
+  # Headline experiment: Qwen-7B.  For a faster validation pass, override on
+  # CLI: `python ... generator.model=Qwen/Qwen2.5-1.5B-Instruct`.
+  model: Qwen/Qwen2.5-7B-Instruct
+  device: mps
+  dtype: float16
+  beam_width: 4
+  max_new_tokens: 128
+  length_alpha: 0.7
+
+lookback:
+  classifier_path: experiments/lookback_lens_qwen/results/classifier.pkl
+  lambda_ll: 1.0          # overridden in sweep
+
+factscore:
+  scorer_model: qwen2.5:7b
+  lambda_fs: 0.5          # overridden in sweep
+  neutral_score_when_no_facts: 0.5
+
+judge:
+  models:
+    - qwen2.5:14b
+    - llama3.1:8b
+  swap_seed: 42
+
+dataset:
+  name: ragtruth
+  n_dev: 20
+  n_test: 200
+
+conditions:
+  - vanilla_hf
+  - vanilla_loop
+  - lookback
+  - factscore
+  - combined
+
+checkpoint_every: 10
+
+output_dir: experiments/guided_generation/results

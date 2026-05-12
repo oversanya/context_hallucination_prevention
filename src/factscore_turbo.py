@@ -299,3 +299,55 @@ class FActScoreTurbo:
         except Exception as exc:
             logger.error("FActScore computation error: %s", exc, exc_info=True)
             return FActScoreResult(score=float("nan"), error=str(exc))
+
+    # ── Sentence-level scoring (used by guided beam search) ──────────────────
+
+    def score_sentence(
+        self,
+        sentence: str,
+        context: str,
+        neutral_score_when_no_facts: float = 0.5,
+    ) -> FActScoreResult:
+        """
+        Score a single sentence at a beam-search sentence boundary.
+
+        Differs from :py:meth:`score` only in the empty-facts policy: returns the
+        neutral score (default 0.5) instead of 1.0 when ``decompose`` extracts no
+        verifiable facts.  This neutralises the degenerate "say nothing" strategy
+        that arises when the FActScore bonus is summed into beam-search scores
+        (audit C4 of the guided-generation plan).
+
+        Parameters
+        ----------
+        sentence : str
+            One sentence (the most recent sentence completed by the beam).
+        context : str
+            The source passage(s) the sentence should be grounded in.
+        neutral_score_when_no_facts : float
+            Score returned when no atomic facts can be extracted.  Default 0.5.
+        """
+        try:
+            facts = self.decompose(sentence)
+            if not facts:
+                return FActScoreResult(
+                    score=float(neutral_score_when_no_facts),
+                    n_facts=0,
+                    n_supported=0,
+                )
+
+            if self.batch_verify and len(facts) > 1:
+                supported = self._verify_batch(facts, context)
+            else:
+                supported = [self._verify_single(f, context) for f in facts]
+
+            n_sup = sum(supported)
+            return FActScoreResult(
+                score=n_sup / len(facts),
+                facts=facts,
+                supported=supported,
+                n_facts=len(facts),
+                n_supported=n_sup,
+            )
+        except Exception as exc:
+            logger.error("FActScore sentence-level error: %s", exc, exc_info=True)
+            return FActScoreResult(score=float("nan"), error=str(exc))

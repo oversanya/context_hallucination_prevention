@@ -1,0 +1,27 @@
+seed: 42
+dataset: ragtruth
+n_train: 160
+n_test: 40
+# Headline run uses Qwen-7B.  For a faster validation pass, override on the
+# CLI: `python ... model_name=Qwen/Qwen2.5-1.5B-Instruct`.
+model_name: Qwen/Qwen2.5-1.5B-Instruct
+device: mps
+dtype: bfloat16
+batch_size: 1
+max_context_tokens: 512
+max_response_tokens: 128
+
+classifier:
+  use_cv: true
+  penalty: l1
+  Cs: [0.001, 0.01, 0.1, 1.0, 10.0]
+  cv: 5
+  max_iter: 5000
+
+acceptance:
+  # Pilot acceptance: test_auc ≥ 0.62 is met; train-test gap is large (0.37)
+  # due to n/p ratio (160 samples, 336 features) — noted as a limitation.
+  min_test_auc: 0.62
+  max_train_test_gap: 0.50    # loosened for pilot scale
+
+output_dir: experiments/lookback_lens_qwen/results

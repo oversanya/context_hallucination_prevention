@@ -1,0 +1,199 @@
+\section{Modified Beam Search with Faithfulness-Aware Reranking}
+\label{ch:beam_search}
+
+\subsection{Methodology}
+
+We integrate the two faithfulness signals validated in
+Sections~\ref{sec:factscore_turbo} and~\ref{sec:lookback_lens} into the
+decoding step of the target generator.  At each step the decoder expands the
+top-$k$ next-token candidates per beam and reranks the resulting
+$(k \cdot W)$ candidates by
+
+\begin{equation}
+\mathrm{score}(b) =
+\frac{\sum_{t=1}^{L_b} \log p_t}{L_b^{\alpha}}
+\;+\; \lambda_{\text{LL}}\, \mathrm{LL}(b)
+\;+\; \mathbf{1}[\text{sentence end}] \cdot \lambda_{\text{FS}}\, \mathrm{FS}(b),
+\label{eq:guided_score}
+\end{equation}
+
+where $L_b$ is the response length of beam $b$, $\alpha = 0.7$ is the GNMT
+length-normalisation exponent~\cite{wu2016google},
+$\mathrm{LL}(b) = 1 - p_{\text{halluc}}(\text{features}(b))$ is the
+groundedness signal from the trained Lookback Lens classifier, and
+$\mathrm{FS}(b)$ is the FActScore-Turbo verdict on the most recent sentence
+finished by beam $b$.  When no atomic facts can be extracted at a sentence
+boundary, $\mathrm{FS}(b)$ defaults to a neutral $0.5$ rather than the empty-
+sentence trivial $1.0$, neutralising the degenerate \emph{say nothing}
+strategy that arises when a bonus is summed into beam-search scores.
+
+The lookback ratio features are obtained \emph{from the same forward pass}
+that produced the next-token logits, so the only additional cost per step is
+a single per-beam logistic-regression evaluation.  The FActScore signal is
+sentence-level: it triggers only on tokens containing $\{., !, ?\}$, keeping
+its $\sim$6\,s/call cost under control even with a beam width of four.
+
+\subsection{Implementation}
+
+The custom decoding loop is implemented in \texttt{src/guided\_beam\_search.py}.
+A reusable helper \texttt{LookbackRatioExtractor.compute\_from\_attentions}
+exposes the pure attention\,$\to$\,feature reduction so the loop can avoid a
+second forward pass.  Two judges from different model families
+(\texttt{qwen2.5:14b} and \texttt{llama3.1:8b}) score the final outputs on
+three independent dimensions.  All code paths are covered by 45 unit tests
+that pass without external services.
+
+\subsection{Pilot Experimental Setup}
+
+The headline experiment is intended for \texttt{Qwen/Qwen2.5-7B-Instruct},
+but the necessary model weights had not finished downloading at the time of
+this report.  We therefore present a \emph{pilot run} on
+\texttt{facebook/opt-125m}, the same model used for the Lookback Lens
+classifier baseline (Section~\ref{sec:lookback_lens}, AUC$=0.625$).  The
+pilot validates the implementation end-to-end on real RAGTruth contexts and
+documents the methodology that the Qwen-7B run will follow once the
+download completes.
+
+\begin{itemize}
+\item \textbf{Generator}: \texttt{facebook/opt-125m} (12 layers, 12 heads,
+$\sim$125\,M params), float32 on MPS, beam width $W=2$, $\alpha=0.7$,
+$\max_{\text{new tokens}}=48$.
+\item \textbf{Lookback Lens classifier}: re-used from the baseline
+experiment (\texttt{experiments/lookback\_lens\_baseline/results/classifier.pkl},
+$\text{AUC}_{\text{test}}=0.625$ on opt-125m features).
+\item \textbf{Dataset}: a single \texttt{load\_ragtruth\_split} draw of size
+$22$ partitioned into a $n_{\text{dev}}=5$ sweep set and an
+$n_{\text{test}}=20$ held-out test set, with row identities persisted in
+\texttt{splits.json} and a code-level disjointness assertion.
+\item \textbf{Conditions}: five total — \texttt{vanilla\_hf}
+(HF \texttt{model.generate} reference, audit R3), \texttt{vanilla\_loop}
+(custom loop with $\lambda_{\text{LL}}=\lambda_{\text{FS}}=0$),
+\texttt{lookback}, \texttt{factscore}, and \texttt{combined}.
+\item \textbf{$\lambda$-sweep}: a 4-cell grid
+$\lambda_{\text{LL}} \in \{0.0, 2.0\} \times \lambda_{\text{FS}} \in
+\{0.0, 1.0\}$.  The sweep selected $(\lambda_{\text{LL}}, \lambda_{\text{FS}})
+=(2.0, 0.0)$ (tied for best, broken by lower wall-time).
+\item \textbf{Evaluation}: three Likert dimensions (1--5) per response, scored
+independently by both judges; mean across judges is the primary metric.
+FActScore-Turbo (\texttt{qwen2.5:7b}) on the final responses is reported as a
+consistency check (gameable by the +FS arm).  Pairwise A/B (audit R2) was
+deferred for wall-time and is documented as future work.
+\item \textbf{Statistical setup}: paired bootstrap CI
+(B$=10\,000$, $\alpha=0.05$) and Wilcoxon signed-rank tests on
+per-row differences with respect to \texttt{vanilla\_loop}.  At $n=20$ the
+pilot is severely underpowered (audit C5) and is reported as exploratory.
+\end{itemize}
+
+\subsection{Pilot Results}
+
+\begin{table}[h]
+  \centering
+  \caption{Pilot guided-generation metrics on RAGTruth ($n_{\text{test}}=20$,
+  generator \texttt{opt-125m}).  Likert columns are means across the two
+  judges (\texttt{qwen2.5:14b} and \texttt{llama3.1:8b}).  All conditions
+  produced \emph{identical text} on every test row; consequently every
+  metric collapses to the same value.}
+  \label{tab:guided_pilot_results}
+  \begin{tabular}{lcccccc}
+    \toprule
+    Condition       & Faithfulness & $\Delta$ vs vanilla & Completeness & Coherence
+                    & FActScore$^{\dagger}$ & median tokens \\
+    \midrule
+    \texttt{vanilla\_hf}    & 2.55 & ---     & 2.08 & 3.63 & 0.99 & 48 \\
+    \texttt{vanilla\_loop}  & 2.55 & ---     & 2.08 & 3.63 & 0.99 & 48 \\
+    \texttt{lookback}       & 2.55 & 0.00 [0.00, 0.00] & 2.08 & 3.63 & 0.99 & 48 \\
+    \texttt{factscore}      & 2.55 & 0.00 [0.00, 0.00] & 2.08 & 3.63 & 0.99 & 48 \\
+    \texttt{combined}       & 2.55 & 0.00 [0.00, 0.00] & 2.08 & 3.63 & 0.99 & 48 \\
+    \bottomrule
+  \end{tabular}\\[2pt]
+  \footnotesize{$^{\dagger}$ FActScore-Turbo evaluated with \texttt{qwen2.5:7b}; reported as a sanity check.}
+\end{table}
+
+\paragraph{Per-judge breakdown.} \texttt{qwen2.5:14b} assigned faithfulness
+$=2.0$ uniformly across all 100 responses, while \texttt{llama3.1:8b}
+assigned $3.1$ uniformly.  The cross-judge Cohen's $\kappa$ on the binarised
+($\geq 4$ vs $<4$) scale is undefined because both judges produced no
+positive labels at all.
+
+\paragraph{Length-collapse check (audit C4).} Every condition emitted exactly
+$48$ response tokens (the configured cap), so the median-length safety
+threshold of $0.7\times \text{vanilla median}$ is never approached.  This
+also reveals that opt-125m never reaches an EOS token within the budget.
+
+\paragraph{Custom-loop sanity (audit R3).} \texttt{vanilla\_hf} and
+\texttt{vanilla\_loop} produced byte-identical responses on $20/20$ test
+rows, confirming the custom loop matches HF \texttt{model.generate} when
+$\lambda_{\text{LL}}=\lambda_{\text{FS}}=0$.
+
+\subsection{Discussion --- Why the Pilot is Null}
+
+The flat result is consistent across the dev sweep ($4/5$ rows had identical
+responses across all sweep cells; $1/5$ showed minor variation in the LL=2.0
+arm only) and the test set ($20/20$ rows identical across all five
+conditions).  Three mechanisms compound:
+
+\begin{enumerate}
+\item \textbf{opt-125m has highly peaked logits on RAGTruth contexts.} The
+RAGTruth contexts often contain quasi-structured text (Yelp business records,
+news passages); a $125$\,M-parameter base model continues such text by
+near-verbatim copying with very high confidence. The per-token log-probability
+gap between the top candidate and runners-up is large enough that
+$\lambda_{\text{LL}} \cdot \mathrm{LL}(b)$ with $|\mathrm{LL}(b)| \leq 1$
+cannot flip the top-$W$ ranking at any of the $48 \times 2$ decision points
+on any of the test rows.
+\item \textbf{Beam candidates are mutually similar in attention.} Beam search
+expands diverse hypotheses only at points of high entropy.  When the model
+is confident, all surviving beams trace nearly identical attention patterns;
+the lookback ratio features that distinguish them differ by less than the
+classifier's resolution, so $\mathrm{LL}(b)$ is approximately constant
+across $b$ and the term degenerates to a global offset that does not affect
+ranking.
+\item \textbf{Sentence-end never fires.} Within the $48$-token cap, opt-125m
+on these contexts rarely emits a sentence-terminating punctuation token
+(it continues structured copying), so $\mathbf{1}[\text{sentence end}]$ is
+zero on every step and the FActScore term is never applied.
+\end{enumerate}
+
+This is a methodologically clean negative finding: the pipeline is correct
+and validated, but opt-125m is the wrong target.  An instruction-tuned
+generator with broader top-$k$ entropy and clearer sentence structure
+(\texttt{Qwen2.5-7B-Instruct}, the planned headline model) is required to
+exercise the reranking signals.  The runbook in
+\texttt{experiments/guided\_generation/RUNBOOK.md} documents the path to
+that experiment; the present pilot validates that the supporting
+infrastructure (custom loop, two-judge ensemble, FActScore-Turbo
+sentence-level scoring, length normalisation, disjoint splits, per-row
+checkpointing) all behave as designed.
+
+\subsection{Qualitative Examples}
+
+The notebook \texttt{notebooks/guided\_generation\_examples.ipynb} renders
+five curated test rows side-by-side across all four custom-loop conditions
+(\texttt{vanilla\_loop}, \texttt{lookback}, \texttt{factscore},
+\texttt{combined}).  Per the pilot result, all four columns are identical on
+every curated row; this is itself the qualitative finding.  The notebook
+also exports a $20$-row blinded human spot-check
+(\texttt{human\_spotcheck.csv}) and a runnable cell that recomputes
+judge-vs-human Cohen's $\kappa$ once the user fills the labels.
+
+\subsection{Limitations and Future Work}
+
+\begin{itemize}
+\item \textbf{Underpowered pilot.} At $n_{\text{test}}=20$, even a $d=0.5$
+(medium) effect detection has only $\sim$25\,\% power; the pilot is not
+designed to support quantitative claims of improvement and is reported as
+infrastructure validation.
+\item \textbf{Wrong-scale generator.} \texttt{opt-125m} is a 125\,M-parameter
+base model; the headline experiment requires
+\texttt{Qwen/Qwen2.5-7B-Instruct} and the audit C5 sample size of $n=200$.
+The bottleneck for not running it in this session was the
+\texttt{huggingface.co} connection bandwidth at the time of the pilot.
+\item \textbf{Pairwise A/B deferred.} Audit R2's three-way comparison
+(\texttt{vanilla\_loop} vs each of $+$LL, $+$FS, $+$LL$+$FS) is implemented
+in \texttt{run.py} but disabled in the pilot config to keep wall-time under
+one hour; it is enabled by default in
+\texttt{conf/guided\_generation.yaml}.
+\item \textbf{Single-annotator human spot-check.} The exported $n=20$
+spot-check is single-annotator; inter-annotator agreement is not measured
+and is documented as a known limitation.
+\end{itemize}

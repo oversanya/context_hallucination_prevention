@@ -48,22 +48,30 @@ class LookbackRatioExtractor:
         device: str = "mps",
         max_context_tokens: int = 384,
         max_response_tokens: int = 128,
+        dtype: str = "float32",
     ) -> None:
         self.model_name = model_name
         self.device = device
         self.max_context_tokens = max_context_tokens
         self.max_response_tokens = max_response_tokens
+        self.dtype = dtype
+
+        torch_dtype = {
+            "float32": torch.float32,
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+        }.get(dtype, torch.float32)
 
         logger.info("Loading tokenizer: %s", model_name)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        logger.info("Loading model: %s on %s", model_name, device)
+        logger.info("Loading model: %s on %s (%s)", model_name, device, dtype)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
             output_attentions=True,
-            torch_dtype=torch.float32,
+            torch_dtype=torch_dtype,
         ).to(device)
         self.model.eval()
 
@@ -77,6 +85,26 @@ class LookbackRatioExtractor:
             self.n_heads,
             self.n_layers * self.n_heads,
         )
+
+    # ── Lightweight constructor for guided-beam-search reuse ──────────────────
+    # When the extractor is used inside the guided beam-search loop, the model
+    # and tokenizer are already loaded by the generator pipeline.  This factory
+    # creates an extractor that knows only the architecture dimensions and can
+    # therefore call ``compute_from_attentions`` without re-loading anything.
+
+    @classmethod
+    def from_dims(cls, n_layers: int, n_heads: int) -> "LookbackRatioExtractor":
+        """Build an extractor with no model attached, suitable for online use."""
+        obj = cls.__new__(cls)
+        obj.model_name          = "<no-model>"
+        obj.device              = "cpu"
+        obj.max_context_tokens  = 0
+        obj.max_response_tokens = 0
+        obj.tokenizer           = None
+        obj.model               = None
+        obj.n_layers            = int(n_layers)
+        obj.n_heads             = int(n_heads)
+        return obj
 
     def extract(self, context: str, response: str) -> np.ndarray:
         """
@@ -128,9 +156,6 @@ class LookbackRatioExtractor:
 
         input_ids      = torch.cat([ctx_ids, resp_ids], dim=1).to(self.device)
         attention_mask = torch.ones(1, n_ctx + n_resp, dtype=torch.long).to(self.device)
-        seq_len        = n_ctx + n_resp
-
-        context_positions = list(range(n_ctx))
 
         # Forward pass — collect all attention tensors.
         with torch.no_grad():
@@ -140,18 +165,53 @@ class LookbackRatioExtractor:
                 output_attentions=True,
             )
 
-        # attentions: tuple of (1, n_heads, seq_len, seq_len) per layer.
-        # Compute per-layer, per-head lookback ratios at response positions.
-        response_positions = list(range(n_ctx, seq_len))
-        features = np.zeros(feature_dim, dtype=np.float32)
+        return self.compute_from_attentions(outputs.attentions, n_ctx=n_ctx, n_resp=n_resp)
 
-        for l_idx, attn_layer in enumerate(outputs.attentions):
+    # ── Pure attention → feature reduction ────────────────────────────────────
+    # Exposed separately so guided beam search can reuse the attentions it has
+    # already computed during the forward pass, with no second forward pass.
+
+    def compute_from_attentions(
+        self,
+        attentions,
+        n_ctx: int,
+        n_resp: int,
+    ) -> np.ndarray:
+        """
+        Reduce a tuple of attention tensors to a lookback ratio feature vector.
+
+        Parameters
+        ----------
+        attentions : tuple of torch.Tensor
+            One tensor per layer of shape (1, n_heads, seq_len, seq_len).
+            Must be the output of a forward pass on a sequence of length
+            ``n_ctx + n_resp`` where context tokens come first.
+        n_ctx : int
+            Number of context tokens (positions 0 .. n_ctx-1).
+        n_resp : int
+            Number of response tokens (positions n_ctx .. n_ctx+n_resp-1).
+
+        Returns
+        -------
+        np.ndarray, shape (n_layers * n_heads,)
+            Mean lookback ratio per (layer, head) over response positions.
+        """
+        feature_dim = self.n_layers * self.n_heads
+        if n_ctx == 0 or n_resp == 0:
+            return np.zeros(feature_dim, dtype=np.float32)
+
+        seq_len = n_ctx + n_resp
+        context_positions  = list(range(n_ctx))
+        response_positions = list(range(n_ctx, seq_len))
+
+        features = np.zeros(feature_dim, dtype=np.float32)
+        for l_idx, attn_layer in enumerate(attentions):
             # attn_layer: (1, n_heads, seq_len, seq_len)
-            attn_np = attn_layer[0].cpu().float().numpy()  # (n_heads, seq_len, seq_len)
+            attn_np = attn_layer[0].cpu().float().numpy()
             for h_idx in range(self.n_heads):
                 ratios = []
                 for t in response_positions:
-                    row = attn_np[h_idx, t, :]          # (seq_len,)
+                    row = attn_np[h_idx, t, :]
                     total = row.sum()
                     if total < 1e-12:
                         continue
@@ -159,7 +219,6 @@ class LookbackRatioExtractor:
                     ratios.append(ctx_mass / total)
                 feat_idx = l_idx * self.n_heads + h_idx
                 features[feat_idx] = float(np.mean(ratios)) if ratios else 0.0
-
         return features
 
     def extract_batch(

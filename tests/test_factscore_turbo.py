@@ -73,6 +73,55 @@ def test_verify_batch_fallback(scorer: FActScoreTurbo, monkeypatch: pytest.Monke
     assert len(call_log) == 3
 
 
+def test_score_sentence_simple(scorer: FActScoreTurbo, monkeypatch: pytest.MonkeyPatch) -> None:
+    """score_sentence must score a single sentence with two facts (one supported)."""
+    DECOMPOSE_REPLY = "Paris is the capital of France.\nThe Eiffel Tower is in Paris."
+
+    def fake_chat(system: str, user: str, max_tokens: int = 512) -> str:
+        if "JSON array" in user:
+            return "[true, false]"
+        return DECOMPOSE_REPLY
+
+    monkeypatch.setattr(scorer, "_chat", fake_chat)
+    result = scorer.score_sentence(
+        sentence="Paris is the capital of France. The Eiffel Tower is in Paris.",
+        context="Paris is the capital of France.",
+    )
+    assert result.score == pytest.approx(0.5)
+    assert result.n_facts == 2
+    assert result.n_supported == 1
+
+
+def test_score_sentence_no_facts_returns_neutral(
+    scorer: FActScoreTurbo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    score_sentence must return the neutral fallback (default 0.5) when no facts
+    can be extracted — this neutralises the 'say nothing' degenerate strategy
+    flagged by audit C4.  Compare with score(): there the empty-facts case
+    returns 1.0.
+    """
+    monkeypatch.setattr(scorer, "_chat", lambda *args, **kwargs: "NO_FACTS")
+
+    sent_result = scorer.score_sentence(
+        sentence="Hmm.", context="Some context.",
+    )
+    assert sent_result.score == pytest.approx(0.5)
+    assert sent_result.n_facts == 0
+    assert sent_result.error is None
+
+    # Custom neutral score.
+    custom = scorer.score_sentence(
+        sentence="Hmm.", context="Some context.",
+        neutral_score_when_no_facts=0.3,
+    )
+    assert custom.score == pytest.approx(0.3)
+
+    # Contrast: full-response score() returns 1.0 for the same empty-facts case.
+    full = scorer.score(response="Hmm, okay.", context="Some context.")
+    assert full.score == 1.0
+
+
 def test_result_is_hallucinated(scorer: FActScoreTurbo, monkeypatch: pytest.MonkeyPatch) -> None:
     """is_hallucinated() threshold boundary: score == threshold → not hallucinated."""
     # Decompose returns two facts long enough to pass the len>12 filter,

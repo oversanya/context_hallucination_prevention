@@ -117,6 +117,38 @@ def test_lookback_ratio_in_unit_interval() -> None:
     np.testing.assert_allclose(features, expected, atol=1e-5)
 
 
+def test_compute_from_attentions_matches_extract() -> None:
+    """
+    Refactor invariant (audit C-related): compute_from_attentions(attentions, n_ctx, n_resp)
+    must produce the same feature vector as extract() does on the full pair.
+    """
+    extractor = _make_extractor_with_mock_model()
+    fake_attn = _make_fake_attentions()
+    _set_model_return(extractor, fake_attn)
+    extractor.tokenizer.side_effect = _two_call_tokenizer()
+
+    via_extract = extractor.extract("ctx text", "resp text")
+    via_direct  = extractor.compute_from_attentions(
+        fake_attn, n_ctx=N_CTX_TOKENS, n_resp=N_RESP_TOKENS,
+    )
+    np.testing.assert_allclose(via_extract, via_direct, atol=1e-6)
+
+
+def test_from_dims_no_model_loaded() -> None:
+    """from_dims() must yield a usable extractor without instantiating any HF model."""
+    extractor = LookbackRatioExtractor.from_dims(n_layers=N_LAYERS, n_heads=N_HEADS)
+    assert extractor.model is None
+    assert extractor.tokenizer is None
+    assert extractor.n_layers == N_LAYERS
+    assert extractor.n_heads == N_HEADS
+
+    fake_attn = _make_fake_attentions()
+    feats = extractor.compute_from_attentions(fake_attn, n_ctx=N_CTX_TOKENS, n_resp=N_RESP_TOKENS)
+    assert feats.shape == (FEATURE_DIM,)
+    assert np.all(feats >= 0.0)
+    assert np.all(feats <= 1.0 + 1e-6)
+
+
 def test_extractor_no_zero_vectors_on_long_context() -> None:
     """
     PLAN §A1 regression test: separate per-budget tokenization must guarantee

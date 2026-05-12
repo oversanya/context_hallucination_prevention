@@ -1,0 +1,61 @@
+# Pilot guided-generation run — Qwen/Qwen2.5-1.5B-Instruct, n_test=5, Summary task.
+#
+# v2 changes (2026-05-01): beam_width 2→4, max_new_tokens 24→128,
+#   per_candidate_ll false (speed), task_filter Summary (harder task).
+# Models:
+#   generator   = Qwen/Qwen2.5-1.5B-Instruct (HF, 1.5B, bfloat16)
+#   judges      = qwen2.5:14b + llama3.1:8b  (cross-family, audit C1)
+#   FS scorer   = qwen2.5:7b  (distinct from generator/judges)
+#   LL classifier = experiments/lookback_lens_qwen/results/classifier.pkl
+#                   (trained on Qwen-1.5B features, 28×16=448 dim)
+
+seed: 42
+
+generator:
+  model: Qwen/Qwen2.5-1.5B-Instruct
+  device: mps
+  dtype: bfloat16
+  beam_width: 4
+  max_new_tokens: 128
+  length_alpha: 0.7
+
+lookback:
+  classifier_path: experiments/lookback_lens_qwen/results/classifier.pkl
+  lambda_ll: 1.0
+  score_mode: blend
+  blend_w: 0.5
+  per_candidate_ll: false   # parent-beam LL only; 10× faster than per-candidate
+
+factscore:
+  scorer_model: qwen2.5:7b
+  lambda_fs: 0.5
+  neutral_score_when_no_facts: 0.5
+
+judge:
+  models:
+    - qwen2.5:14b
+    - llama3.1:8b
+  swap_seed: 42
+
+dataset:
+  name: ragtruth
+  n_dev: 5
+  n_test: 5
+  task_filter: Summary       # summarisation task; model must compress → higher hallucination pressure
+
+conditions:
+  - vanilla_hf
+  - vanilla_loop
+  - lookback
+  - factscore
+  - combined
+
+sweep_grid_ll: [0.0, 2.0]
+sweep_grid_fs: [0.0, 1.0]
+
+checkpoint_every: 5
+
+run_pairwise: false
+run_factscore: true
+
+output_dir: experiments/guided_generation/results_pilot

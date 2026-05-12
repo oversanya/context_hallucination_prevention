@@ -1,10 +1,27 @@
 # Project-specific exclusions
 .claude/
 CLAUDE.md
+PLAN.md
 .vscode/
 outputs/
 .DS_Store
 data/
+
+# Experiment tracking
+.cometml-runs/
+
+# Large binary experiment artifacts
+*.parquet
+*.npy
+*.pkl
+
+# LaTeX build artifacts
+*.aux
+*.fdb_latexmk
+*.fls
+*.toc
+*.out
+report/*.pdf
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

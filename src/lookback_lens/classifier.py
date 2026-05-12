@@ -1,8 +1,13 @@
 """
 LookbackLensClassifier: logistic regression over lookback ratio features.
 
-Wraps sklearn.linear_model.LogisticRegression with serialization helpers
+Wraps sklearn.linear_model.LogisticRegression(CV) with serialization helpers
 and a threshold-aware evaluation method.
+
+When ``use_cv=True`` (default), the classifier uses ``LogisticRegressionCV``
+with an internal stratified k-fold to select ``C`` and supports L1 sparsity.
+This is the recommended setting for high-dimensional features (e.g., Qwen-7B
+attention with 28 layers x 28 heads = 784 features and only ~160 train rows).
 
 Reference: Chuang et al. (2024), Section 3.2.
 """
@@ -10,11 +15,11 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 
 import joblib
 import numpy as np
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LogisticRegression, LogisticRegressionCV
 from sklearn.metrics import (
     f1_score,
     precision_score,
@@ -34,11 +39,50 @@ class LookbackLensClassifier:
     Parameters
     ----------
     max_iter : int
-        Maximum iterations for LogisticRegression solver.
+        Maximum iterations for the solver.
+    use_cv : bool
+        If True, use ``LogisticRegressionCV`` with a stratified k-fold to pick
+        ``C`` from ``Cs`` automatically.  Recommended for high-dim features.
+    Cs : list of float, optional
+        Inverse regularisation strengths to search over.  Default log-grid.
+    penalty : {"l1", "l2"}
+        Regularisation norm.  L1 yields sparse solutions, useful when many
+        attention heads carry no signal.
+    cv : int
+        Number of folds for cross-validation when ``use_cv`` is True.
     """
 
-    def __init__(self, max_iter: int = 1000) -> None:
-        self._clf = LogisticRegression(max_iter=max_iter, solver="lbfgs", C=1.0)
+    def __init__(
+        self,
+        max_iter: int = 5_000,
+        use_cv: bool = True,
+        Cs: Optional[list] = None,
+        penalty: str = "l1",
+        cv: int = 5,
+    ) -> None:
+        self.use_cv     = use_cv
+        self.penalty    = penalty
+        self.cv         = cv
+        self.Cs         = Cs if Cs is not None else [1e-3, 1e-2, 0.1, 1.0, 10.0]
+
+        if use_cv:
+            # liblinear supports L1; saga is more flexible but slower.
+            solver = "liblinear" if penalty == "l1" else "lbfgs"
+            self._clf = LogisticRegressionCV(
+                Cs=self.Cs,
+                cv=cv,
+                penalty=penalty,
+                solver=solver,
+                max_iter=max_iter,
+                scoring="roc_auc",
+                refit=True,
+                n_jobs=1,
+            )
+        else:
+            solver = "liblinear" if penalty == "l1" else "lbfgs"
+            self._clf = LogisticRegression(
+                max_iter=max_iter, solver=solver, C=1.0, penalty=penalty
+            )
         self._fitted = False
 
     # ── Training ──────────────────────────────────────────────────────────────
@@ -57,7 +101,28 @@ class LookbackLensClassifier:
         logger.info(
             "Classifier fitted on %d samples, %d features.", X.shape[0], X.shape[1]
         )
+        if self.use_cv:
+            chosen_C = float(self._clf.C_[0]) if hasattr(self._clf, "C_") else None
+            n_nonzero = int(np.sum(np.abs(self._clf.coef_) > 1e-8))
+            logger.info(
+                "LogisticRegressionCV — chosen C=%s, nonzero coefficients=%d/%d",
+                chosen_C, n_nonzero, X.shape[1],
+            )
         return self
+
+    @property
+    def chosen_C(self) -> Optional[float]:
+        """Selected regularisation strength (only meaningful when use_cv=True and fitted)."""
+        if not self._fitted or not hasattr(self._clf, "C_"):
+            return None
+        return float(self._clf.C_[0])
+
+    @property
+    def n_nonzero_coef(self) -> Optional[int]:
+        """Number of non-zero coefficients (sparsity proxy under L1)."""
+        if not self._fitted or not hasattr(self._clf, "coef_"):
+            return None
+        return int(np.sum(np.abs(self._clf.coef_) > 1e-8))
 
     # ── Inference ─────────────────────────────────────────────────────────────
 
